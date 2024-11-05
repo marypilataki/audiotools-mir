@@ -8,9 +8,9 @@ import numpy as np
 from torch.utils.data import SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
+from .vocabulary import name_to_range, instruments, program_to_name, program_to_index
 from ..core import AudioSignal
 from ..core import util
-
 
 class AudioLoader:
     """Loads audio endlessly from a list of audio sources
@@ -42,14 +42,16 @@ class AudioLoader:
     """
 
     def __init__(
-        self,
-        sources: List[str] = None,
-        weights: List[float] = None,
-        transform: Callable = None,
-        relative_path: str = "",
-        ext: List[str] = util.AUDIO_EXTENSIONS,
-        shuffle: bool = True,
-        shuffle_state: int = 0,
+            self,
+            sources: List[str] = None,
+            weights: List[float] = None,
+            transform: Callable = None,
+            relative_path: str = "",
+            ext: List[str] = util.AUDIO_EXTENSIONS,
+            shuffle: bool = True,
+            shuffle_state: int = 0,
+            instrument_labels: bool = True,
+            noisy_labels: bool = False
     ):
         self.audio_lists = util.read_sources(
             sources, relative_path=relative_path, ext=ext
@@ -67,18 +69,20 @@ class AudioLoader:
         self.sources = sources
         self.weights = weights
         self.transform = transform
+        self.instrument_labels = instrument_labels
+        self.noisy_labels = noisy_labels
 
     def __call__(
-        self,
-        state,
-        sample_rate: int,
-        duration: float,
-        loudness_cutoff: float = -40,
-        num_channels: int = 1,
-        offset: float = None,
-        source_idx: int = None,
-        item_idx: int = None,
-        global_idx: int = None,
+            self,
+            state,
+            sample_rate: int,
+            duration: float,
+            loudness_cutoff: float = -40,
+            num_channels: int = 1,
+            offset: float = None,
+            source_idx: int = None,
+            item_idx: int = None,
+            global_idx: int = None
     ):
         if source_idx is not None and item_idx is not None:
             try:
@@ -88,7 +92,7 @@ class AudioLoader:
         elif global_idx is not None:
             source_idx, item_idx = self.audio_indices[
                 global_idx % len(self.audio_indices)
-            ]
+                ]
             audio_info = self.audio_lists[source_idx][item_idx]
         else:
             audio_info, source_idx, item_idx = util.choose_from_list_of_lists(
@@ -129,15 +133,82 @@ class AudioLoader:
             "item_idx": item_idx,
             "source": str(self.sources[source_idx]),
             "path": str(path),
+            "offset": signal.metadata["offset"]
         }
+        item["pitch_labels"] = get_noisy_label(item) if self.noisy_labels else get_midi_label(item)
         if self.transform is not None:
             item["transform_args"] = self.transform.instantiate(state, signal=signal)
         return item
 
 
+def get_midi_label(item):
+    import librosa
+    import torch
+    from pretty_midi import PrettyMIDI
+    dac_rate = 87
+    start_time = item["offset"]
+    end_time = start_time + item["signal"].duration
+    # define label path based on the dataset
+    if 'slakh' in item['path'].lower():
+        label_path = Path(item["path"]).parent / 'all_src.mid'
+    elif 'maestro' in item['path'].lower():
+        label_path = Path(item["path"]).parent / f'{Path(item["path"]).stem}.midi'
+    else:
+        raise ValueError('Dataset not supported')
+    assert label_path.exists(), f'Label path {label_path} does not exist!'
+
+    num_samples, num_notes = int(item["signal"].duration * dac_rate), 128
+    label = torch.zeros(num_samples, num_notes)
+
+    midi_data = PrettyMIDI(str(label_path))
+    for instrument in midi_data.instruments:
+        if not instrument.is_drum:
+            for note in instrument.notes:
+                if note.start >= start_time:
+                    note_start = librosa.time_to_samples(note.start - start_time, sr=dac_rate)
+                    pitch_index = note.pitch # 0-127
+                    assert pitch_index >= 0, f'Pitch index is negative: {pitch_index}'
+
+                    if note.end <= end_time:
+                        note_end = librosa.time_to_samples(note.end - start_time, sr=dac_rate)
+                        label[note_start:note_end, pitch_index] = 1
+                    else:
+                        label[note_start:, pitch_index] = 1
+    return label
+
+def get_noisy_label(item):
+    import sys
+    sys.path.append('/path/to/basicpitch/module')
+    from basic_pitch import ICASSP_2022_MODEL_PATH
+    from basic_pitch.inference import predict
+    import torch
+    import tensorflow as tf
+
+    dac_rate = 87
+    start_time = item["offset"]
+    end_time = start_time + item["signal"].duration
+
+    num_samples, num_notes = int(item["signal"].duration * dac_rate), 128
+    label = torch.zeros(num_samples, num_notes)
+
+    _, midi_data, _ = predict(item["signal"].audio_data.squeeze().squeeze().detach().cpu().numpy(), sample_rate=item["signal"].sample_rate, model_or_model_path=ICASSP_2022_MODEL_PATH)
+    for instrument in midi_data.instruments:
+        if not instrument.is_drum:
+            for note in instrument.notes:
+                if note.start >= start_time:
+                    note_start = librosa.time_to_samples(note.start - start_time, sr=dac_rate)
+                    pitch_index = note.pitch # 0-127
+                    assert pitch_index >= 0, f'Pitch index is negative: {note.pitch}'
+
+                    if note.end <= end_time:
+                        note_end = librosa.time_to_samples(note.end - start_time, sr=dac_rate)
+                        label[note_start:note_end, pitch_index] = 1
+                    else:
+                        label[note_start:, pitch_index] = 1
+    return label
+
 def default_matcher(x, y):
     return Path(x).parent == Path(y).parent
-
 
 def align_lists(lists, matcher: Callable = default_matcher):
     longest_list = lists[np.argmax([len(l) for l in lists])]
@@ -356,19 +427,19 @@ class AudioDataset:
     """
 
     def __init__(
-        self,
-        loaders: Union[AudioLoader, List[AudioLoader], Dict[str, AudioLoader]],
-        sample_rate: int,
-        n_examples: int = 1000,
-        duration: float = 0.5,
-        offset: float = None,
-        loudness_cutoff: float = -40,
-        num_channels: int = 1,
-        transform: Callable = None,
-        aligned: bool = False,
-        shuffle_loaders: bool = False,
-        matcher: Callable = default_matcher,
-        without_replacement: bool = True,
+            self,
+            loaders: Union[AudioLoader, List[AudioLoader], Dict[str, AudioLoader]],
+            sample_rate: int,
+            n_examples: int = 1000,
+            duration: float = 0.5,
+            offset: float = None,
+            loudness_cutoff: float = -40,
+            num_channels: int = 1,
+            transform: Callable = None,
+            aligned: bool = False,
+            shuffle_loaders: bool = False,
+            matcher: Callable = default_matcher,
+            without_replacement: bool = True,
     ):
         # Internally we convert loaders to a dictionary
         if isinstance(loaders, list):
