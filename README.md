@@ -1,4 +1,4 @@
-# AudioTools-mir
+# audiotools-mir
 
 Object-oriented handling of audio signals, with fast augmentation routines, batching, padding, and more.
 The repo is a fork of [AudioTools](https://github.com/descriptinc/audiotools) with additional features for MIR tasks (work in progress).
