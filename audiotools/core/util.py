@@ -12,6 +12,7 @@ from typing import Dict
 from typing import List
 
 import numpy as np
+import audioread
 import torch
 import torchaudio
 from flatten_dict import flatten
@@ -32,7 +33,6 @@ class Info:
 
 def info(audio_path: str):
     """Shim for torchaudio.info to make 0.7.2 API match 0.8.0.
-
     Parameters
     ----------
     audio_path : str
@@ -41,15 +41,19 @@ def info(audio_path: str):
     # try default backend first, then fallback to soundfile
     try:
         info = torchaudio.info(str(audio_path))
+    except RuntimeError:
+        # try this in case mp3 is not supported (ffmpeg version mismatch?)
+        with audioread.audio_open((str(audio_path))) as f:
+            info = Info(sample_rate=f.samplerate, num_frames=f.duration*f.samplerate)
     except:  # pragma: no cover
         info = torchaudio.backend.soundfile_backend.info(str(audio_path))
-
     if isinstance(info, tuple):  # pragma: no cover
         signal_info = info[0]
         info = Info(sample_rate=signal_info.rate, num_frames=signal_info.length)
-    else:
+    elif isinstance(info, torchaudio.backend.common.AudioMetaData):
         info = Info(sample_rate=info.sample_rate, num_frames=info.num_frames)
-
+    else:
+        assert isinstance(info, Info)
     return info
 
 
