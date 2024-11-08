@@ -11,6 +11,7 @@ import librosa
 import torch
 from torch.utils.data import SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
+import tensorflow as tf
 from basic_pitch.inference import predict
 
 from ..core import AudioSignal
@@ -186,8 +187,9 @@ def get_noisy_label(item):
 
     num_samples, num_notes = int(item["signal"].duration * dac_rate), 128
     label = torch.zeros(num_samples, num_notes)
-
-    _, midi_data, _ = predict(item["signal"].audio_data.squeeze().squeeze().detach().cpu().numpy(), sample_rate=item["signal"].sample_rate)
+    
+    with tf.device('/cpu:0'):
+        _, midi_data, _ = predict(item["signal"].audio_data.squeeze().squeeze().detach().cpu().numpy(), sample_rate=item["signal"].sample_rate)
     for instrument in midi_data.instruments:
         if not instrument.is_drum:
             for note in instrument.notes:
