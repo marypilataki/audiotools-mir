@@ -4,9 +4,14 @@ from typing import Dict
 from typing import List
 from typing import Union
 
+
 import numpy as np
+from pretty_midi import PrettyMIDI
+import librosa
+import torch
 from torch.utils.data import SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
+from basic_pitch.inference import predict
 
 from ..core import AudioSignal
 from ..core import util
@@ -141,9 +146,7 @@ class AudioLoader:
 
 
 def get_midi_label(item):
-    import librosa
-    import torch
-    from pretty_midi import PrettyMIDI
+
     dac_rate = 87
     start_time = item["offset"]
     end_time = start_time + item["signal"].duration
@@ -176,9 +179,6 @@ def get_midi_label(item):
     return label
 
 def get_noisy_label(item):
-    from basic_pitch.inference import predict
-    import torch
-    import librosa
 
     dac_rate = 87
     start_time = item["offset"]
